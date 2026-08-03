@@ -1,0 +1,125 @@
+name: Fetch TEXBAT metadata
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Download TEXBAT metadata
+        shell: bash
+        run: |
+          set -u
+
+          mkdir -p texbat_metadata
+
+          BASE_URLS=(
+            "https://rnl-data.ae.utexas.edu/datastore/texbat"
+            "http://rnl-data.ae.utexas.edu/datastore/texbat"
+            "https://radionavlab.ae.utexas.edu/datastore/texbat"
+            "http://radionavlab.ae.utexas.edu/datastore/texbat"
+          )
+
+          FILES=(
+            cleanStatic.md5
+            cleanStatic.xml
+            cleanDynamic.md5
+            cleanDynamic.xml
+            ds1.md5 ds1.xml
+            ds2.md5 ds2.xml
+            ds3.md5 ds3.xml
+            ds4.md5 ds4.xml
+            ds5.md5 ds5.xml
+            ds6.md5 ds6.xml
+            ds7.md5
+            ds8.md5
+          )
+
+          download_one() {
+            local filename="$1"
+            local success=0
+
+            for base in "${BASE_URLS[@]}"; do
+              url="${base}/${filename}"
+              echo "Trying ${url}"
+
+              if curl \
+                -4 \
+                --http1.1 \
+                --location \
+                --fail \
+                --silent \
+                --show-error \
+                --retry 5 \
+                --retry-all-errors \
+                --retry-delay 5 \
+                --connect-timeout 30 \
+                --max-time 180 \
+                --header "Accept-Encoding: identity" \
+                --header "Accept: application/octet-stream,application/xml,text/xml,text/plain,*/*" \
+                --user-agent "Mozilla/5.0" \
+                --output "texbat_metadata/${filename}.part" \
+                "${url}"; then
+
+                if [ ! -s "texbat_metadata/${filename}.part" ]; then
+                  echo "Empty response: ${filename}"
+                  rm -f "texbat_metadata/${filename}.part"
+                  continue
+                fi
+
+                if head -c 200 "texbat_metadata/${filename}.part" | \
+                   grep -Eiq '<!doctype html|<html|access denied|bad gateway|not found'; then
+                  echo "Received HTML/error page: ${filename}"
+                  rm -f "texbat_metadata/${filename}.part"
+                  continue
+                fi
+
+                if [[ "${filename}" == *.md5 ]]; then
+                  if ! grep -Eiq '[0-9a-f]{32}' "texbat_metadata/${filename}.part"; then
+                    echo "No valid MD5 hash found: ${filename}"
+                    rm -f "texbat_metadata/${filename}.part"
+                    continue
+                  fi
+                fi
+
+                if [[ "${filename}" == *.xml ]]; then
+                  if ! head -c 200 "texbat_metadata/${filename}.part" | grep -q '<'; then
+                    echo "Response does not look like XML: ${filename}"
+                    rm -f "texbat_metadata/${filename}.part"
+                    continue
+                  fi
+                fi
+
+                mv "texbat_metadata/${filename}.part" \
+                   "texbat_metadata/${filename}"
+
+                echo "Downloaded ${filename}"
+                success=1
+                break
+              fi
+            done
+
+            if [ "${success}" -eq 0 ]; then
+              echo "${filename}" >> texbat_metadata/FAILED_FILES.txt
+            fi
+          }
+
+          for filename in "${FILES[@]}"; do
+            download_one "${filename}"
+          done
+
+          echo "Downloaded files:"
+          find texbat_metadata -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+
+          zip -r texbat_metadata.zip texbat_metadata
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TEXBAT-metadata
+          path: texbat_metadata.zip
+          retention-days: 7
+          if-no-files-found: error
